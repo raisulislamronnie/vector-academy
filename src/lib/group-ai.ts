@@ -1,7 +1,7 @@
 import "server-only";
 import { friendlyError } from "./errors";
 import { addGroupMessage, listGroupMessages } from "./db";
-import { bus, groupChannel } from "./bus";
+import { setTyping } from "./realtime";
 import { geminiText } from "./gemini";
 import type { Group } from "./schemas";
 
@@ -14,8 +14,7 @@ If someone wants a full course, slides, quiz or assignments, tell them to ask in
 
 /** Generates an AI reply to the group's recent conversation and broadcasts it. */
 export async function replyInGroup(group: Group) {
-  const channel = groupChannel(group.id);
-  bus.emit(channel, { type: "typing", name: AI_AUTHOR.name, on: true });
+  await setTyping(group.id, AI_AUTHOR.id, AI_AUTHOR.name, true);
   let text: string;
   try {
     const history = await listGroupMessages(group.id, 30);
@@ -32,7 +31,7 @@ export async function replyInGroup(group: Group) {
     console.error("[group-ai]", err);
     text = `⚠️ ${friendlyError(err)}`;
   }
-  const msg = await addGroupMessage({
+  await addGroupMessage({
     groupId: group.id,
     authorId: AI_AUTHOR.id,
     authorName: AI_AUTHOR.name,
@@ -40,6 +39,5 @@ export async function replyInGroup(group: Group) {
     kind: "ai",
     text,
   });
-  bus.emit(channel, { type: "typing", name: AI_AUTHOR.name, on: false });
-  bus.emit(channel, { type: "message", message: msg });
+  await setTyping(group.id, AI_AUTHOR.id, AI_AUTHOR.name, false);
 }

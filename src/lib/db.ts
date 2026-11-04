@@ -2,13 +2,14 @@ import "server-only";
 import { promises as fs } from "fs";
 import path from "path";
 import { randomUUID } from "crypto";
+import { Redis } from "@upstash/redis";
 import type { ChatMessage } from "./chat-types";
 import type { Content as GeminiContent } from "@google/genai";
 import type { Course, CourseSummary, Group, GroupMessage, Resource } from "./schemas";
 
 /**
- * Tiny JSON-file database. Good for a single-instance deployment / local use.
- * Swap for Postgres/SQLite when you scale horizontally.
+ * Tiny database: Upstash Redis (single JSON blob) when UPSTASH_REDIS_REST_URL/TOKEN
+ * (or KV_REST_API_URL/TOKEN) are set, otherwise a local JSON file.
  */
 
 export interface Conversation {
@@ -40,9 +41,43 @@ const SEED_GROUPS: Omit<Group, "id" | "createdAt">[] = [
   { name: "Exam Prep Lab", description: "Share quizzes, mock papers & revision strategies", emoji: "🎯" },
 ];
 
-const g = globalThis as unknown as { __vaData?: Data; __vaWrite?: Promise<void> };
+const g = globalThis as unknown as { __vaData?: Data; __vaWrite?: Promise<void>; __vaRedis?: Redis | null };
+
+/** Upstash/Vercel KV credentials (Vercel Marketplace sets one of these pairs). */
+function getRedis(): Redis | null {
+  if (g.__vaRedis !== undefined) return g.__vaRedis;
+  const url = process.env.UPSTASH_REDIS_REST_URL ?? process.env.KV_REST_API_URL;
+  const token = process.env.UPSTASH_REDIS_REST_TOKEN ?? process.env.KV_REST_API_TOKEN;
+  g.__vaRedis = url && token ? new Redis({ url, token }) : null;
+  return g.__vaRedis;
+}
+export const redis = getRedis;
+
+const REDIS_KEY = "vector-academy:data";
+
+function seed(): Data {
+  const now = new Date().toISOString();
+  return {
+    courses: [],
+    resources: [],
+    conversations: [],
+    groups: SEED_GROUPS.map((s) => ({ ...s, id: randomUUID(), createdAt: now })),
+    groupMessages: [],
+  };
+}
 
 async function load(): Promise<Data> {
+  const r = getRedis();
+  if (r) {
+    // Serverless: no instance cache, always read the shared store.
+    let d = await r.get<Data>(REDIS_KEY);
+    if (!d) {
+      d = seed();
+      await r.set(REDIS_KEY, d);
+    }
+    d.resources ??= [];
+    return d;
+  }
   if (g.__vaData) {
     g.__vaData.resources ??= []; // data loaded before this field existed
     return g.__vaData;
@@ -52,24 +87,19 @@ async function load(): Promise<Data> {
     g.__vaData = JSON.parse(raw) as Data;
     g.__vaData.resources ??= [];
   } catch {
-    const now = new Date().toISOString();
-    g.__vaData = {
-      courses: [],
-      resources: [],
-      conversations: [],
-      groups: SEED_GROUPS.map((s) => ({ ...s, id: randomUUID(), createdAt: now })),
-      groupMessages: [],
-    };
-    await persist();
+    g.__vaData = seed();
+    await persist(g.__vaData);
   }
   return g.__vaData!;
 }
 
-function persist(): Promise<void> {
+function persist(d: Data): Promise<void> {
+  const r = getRedis();
+  if (r) return r.set(REDIS_KEY, d).then(() => {});
   const run = async () => {
     await fs.mkdir(path.dirname(DB_PATH), { recursive: true });
     const tmp = `${DB_PATH}.${process.pid}.tmp`;
-    await fs.writeFile(tmp, JSON.stringify(g.__vaData), "utf8");
+    await fs.writeFile(tmp, JSON.stringify(d), "utf8");
     await fs.rename(tmp, DB_PATH);
   };
   g.__vaWrite = (g.__vaWrite ?? Promise.resolve()).then(run, run);
@@ -113,7 +143,7 @@ export async function saveCourse(course: Course): Promise<void> {
   const i = d.courses.findIndex((c) => c.id === course.id);
   if (i >= 0) d.courses[i] = course;
   else d.courses.push(course);
-  await persist();
+  await persist(d);
 }
 
 export async function updateCourse(id: string, patch: Partial<Course>): Promise<Course | null> {
@@ -121,7 +151,7 @@ export async function updateCourse(id: string, patch: Partial<Course>): Promise<
   const c = d.courses.find((x) => x.id === id);
   if (!c) return null;
   Object.assign(c, patch);
-  await persist();
+  await persist(d);
   return c;
 }
 
@@ -129,7 +159,7 @@ export async function deleteCourse(id: string): Promise<boolean> {
   const d = await load();
   const before = d.courses.length;
   d.courses = d.courses.filter((c) => c.id !== id);
-  await persist();
+  await persist(d);
   return d.courses.length !== before;
 }
 
@@ -143,7 +173,7 @@ export async function getResource(id: string): Promise<Resource | null> {
 export async function saveResource(r: Resource): Promise<void> {
   const d = await load();
   d.resources.push(r);
-  await persist();
+  await persist(d);
 }
 
 /* ---------- Conversations ---------- */
@@ -192,13 +222,13 @@ export async function saveConversation(conv: Conversation): Promise<void> {
   const i = d.conversations.findIndex((c) => c.id === conv.id);
   if (i >= 0) d.conversations[i] = conv;
   else d.conversations.push(conv);
-  await persist();
+  await persist(d);
 }
 
 export async function deleteConversation(id: string, ownerId: string): Promise<void> {
   const d = await load();
   d.conversations = d.conversations.filter((c) => !(c.id === id && c.ownerId === ownerId));
-  await persist();
+  await persist(d);
 }
 
 /* ---------- Groups ---------- */
@@ -221,7 +251,7 @@ export async function createGroup(input: Omit<Group, "id" | "createdAt">): Promi
   const d = await load();
   const grp: Group = { ...input, id: randomUUID(), createdAt: new Date().toISOString() };
   d.groups.push(grp);
-  await persist();
+  await persist(d);
   return grp;
 }
 
@@ -234,6 +264,6 @@ export async function addGroupMessage(msg: Omit<GroupMessage, "id" | "createdAt"
   const d = await load();
   const full: GroupMessage = { ...msg, id: randomUUID(), createdAt: new Date().toISOString() };
   d.groupMessages.push(full);
-  await persist();
+  await persist(d);
   return full;
 }

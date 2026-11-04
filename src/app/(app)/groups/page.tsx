@@ -72,33 +72,43 @@ function GroupsPage() {
       .then((m: GroupMessage[]) => !cancelled && setMessages(m))
       .catch(() => !cancelled && setMessages([]));
 
-    const es = new EventSource(`/api/groups/${groupId}/stream`);
-    es.onopen = () => setConnected(true);
-    es.onerror = () => setConnected(false);
-    es.onmessage = (ev) => {
-      const e = JSON.parse(ev.data);
-      if (e.type === "message") {
-        const m = e.message as GroupMessage;
-        setMessages((prev) => (prev && !prev.some((x) => x.id === m.id) ? [...prev, m] : prev));
-        setTyping((t) => {
-          const n = { ...t };
-          delete n[m.authorId];
-          return n;
-        });
-        setGroups((gs) => gs?.map((g) => (g.id === m.groupId ? { ...g, lastMessage: m, messageCount: g.messageCount + 1 } : g)) ?? gs);
-      } else if (e.type === "typing") {
-        const key = e.userId ?? "vector-ai";
-        setTyping((t) => {
-          const n = { ...t };
-          if (e.on) n[key] = { name: e.name, until: Date.now() + (key === "vector-ai" ? 60000 : 4000) };
-          else delete n[key];
-          return n;
-        });
+    // Serverless-friendly realtime: poll messages + typing every 2s.
+    const poll = async () => {
+      try {
+        const [mr, tr_] = await Promise.all([
+          fetch(`/api/groups/${groupId}/messages`, { cache: "no-store" }),
+          fetch(`/api/groups/${groupId}/typing`, { cache: "no-store" }),
+        ]);
+        if (cancelled) return;
+        if (mr.ok) {
+          const list = (await mr.json()) as GroupMessage[];
+          setMessages((prev) => {
+            if (!prev) return list;
+            const seen = new Set(prev.map((x) => x.id));
+            const fresh = list.filter((x) => !seen.has(x.id));
+            return fresh.length ? [...prev, ...fresh] : prev;
+          });
+          const last = list[list.length - 1];
+          if (last) {
+            setGroups((gs) =>
+              gs?.map((g) => (g.id === last.groupId && g.lastMessage?.id !== last.id ? { ...g, lastMessage: last, messageCount: list.length } : g)) ?? gs,
+            );
+          }
+        }
+        if (tr_.ok) {
+          const list = (await tr_.json()) as { userId: string; name: string }[];
+          setTyping(Object.fromEntries(list.map((t) => [t.userId, { name: t.name, until: Date.now() + 5000 }])));
+        }
+        setConnected(true);
+      } catch {
+        if (!cancelled) setConnected(false);
       }
     };
+    const timer = setInterval(poll, 2000);
+    poll();
     return () => {
       cancelled = true;
-      es.close();
+      clearInterval(timer);
       setConnected(false);
     };
   }, [groupId]);

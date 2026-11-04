@@ -1,11 +1,12 @@
+import { after } from "next/server";
 import { z } from "zod";
 import { addGroupMessage, getCourse, getGroup, listGroupMessages } from "@/lib/db";
-import { bus, groupChannel } from "@/lib/bus";
 import { replyInGroup } from "@/lib/group-ai";
 import { UserSchema } from "@/lib/schemas";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+export const maxDuration = 60;
 
 type Ctx = { params: Promise<{ id: string }> };
 
@@ -48,9 +49,8 @@ export async function POST(request: Request, { params }: Ctx) {
     courseId,
     courseTitle,
   });
-  bus.emit(groupChannel(id), { type: "message", message: msg });
 
-  if (/@(ai|vector)\b/i.test(text)) void replyInGroup(group);
+  if (/@(ai|vector)\b/i.test(text)) after(() => replyInGroup(group));
 
   return Response.json(msg);
 }
