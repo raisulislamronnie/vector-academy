@@ -8,7 +8,7 @@ import { repairGeminiHistory, runGeminiChat } from "@/lib/gemini-chat";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-export const maxDuration = 800;
+export const maxDuration = 300;
 
 const SYSTEM = `You are Vector, the AI teaching assistant inside Vector Academy — a studio where tutors make teaching material.
 
